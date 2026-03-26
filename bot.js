@@ -17,7 +17,9 @@ if (!OWNER_CHAT_ID) {
 }
 
 const bot = new TelegramBot(token, { polling: true });
+
 const userState = {};
+
 console.log('Бот запущен...');
 
 function getMainKeyboard() {
@@ -73,7 +75,10 @@ function getContactKeyboard() {
   };
 }
 
-async function sendMainMenu(chatId, text = 'Привет 👋\nЯ помощник Алексея.\n\nВыбери, что тебе нужно:') {
+async function sendMainMenu(
+  chatId,
+  text = 'Привет 👋\nЯ помощник Алексея.\n\nВыбери, что тебе нужно:'
+) {
   userState[chatId] = { step: 'main' };
 
   await bot.sendMessage(chatId, text, {
@@ -87,20 +92,67 @@ async function forwardLeadToOwner(msg, topic) {
 
   const username = msg.from?.username ? '@' + msg.from.username : 'нет';
 
+  const replyHint = `/reply ${msg.chat.id} `;
+
   await bot.sendMessage(
     OWNER_CHAT_ID,
-    `📩 Новая заявка в боте
+    `📩 <b>Новая заявка</b>
 
-📌 Тема: ${topic}
-👤 Имя: ${name}
-🆔 Username: ${username}
-🧾 User ID: ${msg.from?.id}
-💬 Chat ID: ${msg.chat.id}
+📍 <b>Источник:</b> бот
+📌 <b>Тема:</b> ${topic}
+👤 <b>Имя:</b> ${name}
+🔗 <b>Username:</b> ${username}
+🆔 <b>User ID:</b> ${msg.from?.id}
+💬 <b>Chat ID:</b> ${msg.chat.id}
 
-Сообщение:
-${msg.text}`
+<b>Сообщение:</b>
+${msg.text}
+
+<b>Быстрый ответ:</b>
+<code>${replyHint}</code>`,
+    {
+      parse_mode: 'HTML',
+    }
   );
 }
+
+// Команда ответа клиенту от имени бота
+bot.onText(/^\/reply\s+(\d+)\s+([\s\S]+)/, async (msg, match) => {
+  const ownerChatId = msg.chat.id;
+
+  if (ownerChatId !== OWNER_CHAT_ID) {
+    return bot.sendMessage(ownerChatId, '❌ У тебя нет доступа к этой команде.');
+  }
+
+  const targetChatId = Number(match[1]);
+  const replyText = match[2].trim();
+
+  if (!targetChatId || !replyText) {
+    return bot.sendMessage(
+      ownerChatId,
+      'Использование:\n/reply CHAT_ID текст_ответа'
+    );
+  }
+
+  try {
+    await bot.sendMessage(
+      targetChatId,
+      `💬 Алексей на связи
+
+${replyText}`
+    );
+
+    await bot.sendMessage(
+      ownerChatId,
+      `✅ Ответ отправлен пользователю ${targetChatId}`
+    );
+  } catch (error) {
+    await bot.sendMessage(
+      ownerChatId,
+      `❌ Не удалось отправить ответ: ${error.message}`
+    );
+  }
+});
 
 bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const source = match?.[1];
@@ -118,6 +170,7 @@ bot.on('message', async (msg) => {
 
   if (!text) return;
   if (text.startsWith('/start')) return;
+  if (text.startsWith('/reply')) return;
 
   if (!userState[chatId]) {
     userState[chatId] = { step: 'main' };
@@ -159,12 +212,19 @@ bot.on('message', async (msg) => {
     });
   }
 
-  if (text === 'Сайт-визитка' || text === 'Лендинг' || text === 'Доработка сайта' || text === 'Интернет-магазин') {
+  if (
+    text === 'Сайт-визитка' ||
+    text === 'Лендинг' ||
+    text === 'Доработка сайта' ||
+    text === 'Интернет-магазин'
+  ) {
     await forwardLeadToOwner(msg, `Сайт: ${text}`);
 
     return bot.sendMessage(
       chatId,
-      `Отлично, выбрано: ${text} ✅\n\nАлексей получил заявку и свяжется с тобой.`
+      `Заявку получил ✅
+
+Алексей уже увидел её и ответит тебе в ближайшее время.`
     );
   }
 
@@ -178,7 +238,9 @@ bot.on('message', async (msg) => {
 
     return bot.sendMessage(
       chatId,
-      `Принял: ${text} ✅\n\nАлексей получил заявку и ответит как можно скорее.`
+      `Заявку получил ✅
+
+Алексей уже увидел её и ответит тебе в ближайшее время.`
     );
   }
 
@@ -192,7 +254,9 @@ bot.on('message', async (msg) => {
 
     return bot.sendMessage(
       chatId,
-      `Принял: ${text} ✅\n\nАлексей получил заявку и свяжется с тобой.`
+      `Заявку получил ✅
+
+Алексей уже увидел её и ответит тебе в ближайшее время.`
     );
   }
 
@@ -222,24 +286,20 @@ bot.on('message', async (msg) => {
 
     return bot.sendMessage(
       chatId,
-      'Сообщение получил ✅\nАлексей увидит его и ответит тебе.',
+      `Сообщение получил ✅
+
+Алексей уже увидел его и ответит тебе в ближайшее время.`,
       {
         reply_markup: getMainKeyboard(),
       }
     );
   }
 
-  return bot.sendMessage(
-    chatId,
-    'Выбери нужный раздел кнопками ниже 👇',
-    {
-      reply_markup: getMainKeyboard(),
-    }
-  );
+  return bot.sendMessage(chatId, 'Выбери нужный раздел кнопками ниже 👇', {
+    reply_markup: getMainKeyboard(),
+  });
 });
 
 bot.on('polling_error', (error) => {
   console.error('Ошибка polling:', error.message);
 });
-
-console.log('Бот запущен...');
