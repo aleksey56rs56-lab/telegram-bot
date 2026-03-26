@@ -54,6 +54,7 @@ function ensureDbFile() {
       replies: [],
       meta: {
         leadCounter: 0,
+        admins: [],
       },
     };
     fs.writeFileSync(DB_FILE, JSON.stringify(initial, null, 2), 'utf8');
@@ -64,14 +65,23 @@ function readDb() {
   try {
     ensureDbFile();
     const raw = fs.readFileSync(DB_FILE, 'utf8');
-    return JSON.parse(raw);
+    const db = JSON.parse(raw);
+
+    if (!db.meta) db.meta = {};
+    if (!Array.isArray(db.meta.admins)) db.meta.admins = [];
+    if (typeof db.meta.leadCounter !== 'number') db.meta.leadCounter = 0;
+    if (!db.users) db.users = {};
+    if (!Array.isArray(db.leads)) db.leads = [];
+    if (!Array.isArray(db.replies)) db.replies = [];
+
+    return db;
   } catch (error) {
     console.error('Ошибка чтения db.json:', error.message);
     return {
       users: {},
       leads: [],
       replies: [],
-      meta: { leadCounter: 0 },
+      meta: { leadCounter: 0, admins: [] },
     };
   }
 }
@@ -82,6 +92,37 @@ function writeDb(db) {
   } catch (error) {
     console.error('Ошибка записи db.json:', error.message);
   }
+}
+
+function isOwner(chatId) {
+  return Number(chatId) === OWNER_CHAT_ID;
+}
+
+function isAdmin(chatId) {
+  const db = readDb();
+  return isOwner(chatId) || db.meta.admins.includes(Number(chatId));
+}
+
+function addAdmin(chatId) {
+  const db = readDb();
+  const id = Number(chatId);
+
+  if (!db.meta.admins.includes(id)) {
+    db.meta.admins.push(id);
+    writeDb(db);
+  }
+}
+
+function removeAdmin(chatId) {
+  const db = readDb();
+  const id = Number(chatId);
+  db.meta.admins = db.meta.admins.filter((x) => x !== id);
+  writeDb(db);
+}
+
+function listAdmins() {
+  const db = readDb();
+  return db.meta.admins || [];
 }
 
 function escapeHtml(text = '') {
@@ -101,6 +142,7 @@ function displayNameOf(msg) {
 
 function getUserRecord(db, chatId, msg = null) {
   const key = String(chatId);
+
   if (!db.users[key]) {
     db.users[key] = {
       chatId,
@@ -152,7 +194,6 @@ function isSpam(chatId, text = '') {
   const sameText = last.text === text;
 
   spamMap[chatId] = { time: now, text };
-
   return tooFast && sameText;
 }
 
@@ -188,7 +229,7 @@ function getSupportKeyboard() {
   };
 }
 
-function getAdminKeyboard() {
+function getAdminKeyboardUser() {
   return {
     keyboard: [
       ['Настройка ПК', 'Настройка сети'],
@@ -213,6 +254,42 @@ function getDialogKeyboard() {
   return {
     keyboard: [['🏠 В меню']],
     resize_keyboard: true,
+  };
+}
+
+function getAdminPanelKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '📊 Статистика', callback_data: 'admin:stats' },
+        { text: '💬 Диалоги', callback_data: 'admin:dialogs' },
+      ],
+      [
+        { text: '🧾 Последние', callback_data: 'admin:last' },
+        { text: '🧩 Шаблоны', callback_data: 'admin:templates' },
+      ],
+      [
+        { text: '👮 Админы', callback_data: 'admin:admins' },
+        { text: '🏠 Главное меню', callback_data: 'admin:home' },
+      ],
+    ],
+  };
+}
+
+function getTemplatesKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '🌐 Шаблон сайт', callback_data: 'admin_template:site' },
+        { text: '🛠 Шаблон техподдержка', callback_data: 'admin_template:support' },
+      ],
+      [
+        { text: '⚙️ Шаблон админ', callback_data: 'admin_template:admin' },
+      ],
+      [
+        { text: '⬅️ Назад', callback_data: 'admin:home' },
+      ],
+    ],
   };
 }
 
@@ -345,7 +422,7 @@ function saveOwnerReply(chatId, text) {
     role: 'owner',
     kind: 'reply',
     text,
-    topic: 'Ответ владельца',
+    topic: 'Ответ админа',
   });
 
   writeDb(db);
@@ -389,12 +466,23 @@ function closeDialog(chatId) {
 
 function getUserSummary(chatId) {
   const db = readDb();
-  const user = db.users[String(chatId)];
-  if (!user) return null;
-  return user;
+  return db.users[String(chatId)] || null;
 }
 
-async function notifyOwnerAboutLead({
+async function notifyAdmins(text, options = {}) {
+  const adminIds = [OWNER_CHAT_ID, ...listAdmins()];
+  const unique = [...new Set(adminIds.map(Number))];
+
+  for (const id of unique) {
+    try {
+      await bot.sendMessage(id, text, options);
+    } catch (error) {
+      console.error(`Не удалось отправить сообщение админу ${id}:`, error.message);
+    }
+  }
+}
+
+async function notifyAdminsAboutLead({
   msg,
   title,
   source,
@@ -414,8 +502,7 @@ async function notifyOwnerAboutLead({
 
   const extraText = details.length ? '\n' + details.join('\n') : '';
 
-  await bot.sendMessage(
-    OWNER_CHAT_ID,
+  await notifyAdmins(
     `📩 <b>${escapeHtml(title)}</b>
 
 #lead_${lead.id}
@@ -441,14 +528,13 @@ ${escapeHtml(msg.text || msg.caption || '[без текста]')}
   );
 }
 
-async function notifyOwnerAboutDialogMessage(msg) {
+async function notifyAdminsAboutDialogMessage(msg) {
   const name = displayNameOf(msg);
   const username = usernameOf(msg);
 
   const lead = saveDialogMessage(msg);
 
-  await bot.sendMessage(
-    OWNER_CHAT_ID,
+  await notifyAdmins(
     `💬 <b>Новое сообщение в диалоге</b>
 
 #lead_${lead.id}
@@ -471,7 +557,7 @@ ${escapeHtml(msg.text || msg.caption || '[без текста]')}
   );
 }
 
-async function notifyOwnerAboutMedia(msg, mediaType) {
+async function notifyAdminsAboutMedia(msg, mediaType) {
   const db = readDb();
   const user = getUserRecord(db, msg.chat.id, msg);
 
@@ -500,8 +586,7 @@ async function notifyOwnerAboutMedia(msg, mediaType) {
 
   writeDb(db);
 
-  await bot.sendMessage(
-    OWNER_CHAT_ID,
+  await notifyAdmins(
     `📎 <b>Новое медиа-сообщение</b>
 
 #lead_${leadId}
@@ -520,10 +605,15 @@ ${msg.caption ? `\n<b>Подпись:</b>\n${escapeHtml(msg.caption)}` : ''}
     }
   );
 
-  try {
-    await bot.forwardMessage(OWNER_CHAT_ID, msg.chat.id, msg.message_id);
-  } catch (error) {
-    console.error('Не удалось переслать медиа:', error.message);
+  const adminIds = [OWNER_CHAT_ID, ...listAdmins()];
+  const unique = [...new Set(adminIds.map(Number))];
+
+  for (const id of unique) {
+    try {
+      await bot.forwardMessage(id, msg.chat.id, msg.message_id);
+    } catch (error) {
+      console.error(`Не удалось переслать медиа админу ${id}:`, error.message);
+    }
   }
 }
 
@@ -578,12 +668,179 @@ async function sendStatusToUser(chatId, status) {
   }
 }
 
+function buildStatsText() {
+  const db = readDb();
+  const totalLeads = db.leads.filter((x) => x.type === 'lead').length;
+  const totalDialogs = Object.values(db.users).filter((u) => u.activeDialog).length;
+  const statusCounts = Object.values(db.users).reduce(
+    (acc, user) => {
+      acc[user.currentStatus] = (acc[user.currentStatus] || 0) + 1;
+      return acc;
+    },
+    { new: 0, in_progress: 0, waiting: 0, closed: 0 }
+  );
+
+  return `📊 <b>Статистика бота</b>
+
+📩 Всего заявок: ${totalLeads}
+💬 Активных диалогов: ${totalDialogs}
+
+<b>Статусы:</b>
+• Новых: ${statusCounts.new || 0}
+• В работе: ${statusCounts.in_progress || 0}
+• Ждут ответа: ${statusCounts.waiting || 0}
+• Закрытых: ${statusCounts.closed || 0}`;
+}
+
+function buildDialogsText() {
+  const db = readDb();
+  const active = Object.values(db.users).filter((u) => u.activeDialog);
+
+  if (!active.length) {
+    return 'Сейчас активных диалогов нет.';
+  }
+
+  const lines = active.slice(-20).map((u) => {
+    return `• ${u.name} | ${u.username} | ${u.chatId} | ${leadStatusLabel(u.currentStatus)}`;
+  });
+
+  return `💬 <b>Активные диалоги</b>
+
+${escapeHtml(lines.join('\n'))}`;
+}
+
+function buildLastText(count = 8) {
+  const db = readDb();
+  const items = db.leads.slice(-count).reverse();
+
+  if (!items.length) {
+    return 'Заявок пока нет.';
+  }
+
+  const lines = items.map((x) => {
+    return `#${x.id} | ${x.topic} | ${x.name} | ${x.chatId} | ${leadStatusLabel(x.status || 'new')}`;
+  });
+
+  return `🧾 <b>Последние записи</b>
+
+${escapeHtml(lines.join('\n'))}`;
+}
+
+function buildAdminsText() {
+  const admins = listAdmins();
+
+  if (!admins.length) {
+    return `👮 <b>Дополнительных админов пока нет</b>
+
+Команды:
+<code>/addadmin CHAT_ID</code>
+<code>/deladmin CHAT_ID</code>
+<code>/admins</code>`;
+  }
+
+  const lines = admins.map((id) => `• ${id}`);
+
+  return `👮 <b>Список админов</b>
+
+${escapeHtml(lines.join('\n'))}
+
+Команды:
+<code>/addadmin CHAT_ID</code>
+<code>/deladmin CHAT_ID</code>
+<code>/admins</code>`;
+}
+
+async function sendAdminPanel(chatId) {
+  return bot.sendMessage(
+    chatId,
+    `🛠 <b>Мини админка</b>
+
+Выбери действие ниже.`,
+    {
+      parse_mode: 'HTML',
+      reply_markup: getAdminPanelKeyboard(),
+    }
+  );
+}
+
 // =========================
 // АДМИН-КОМАНДЫ
 // =========================
 
+bot.onText(/^\/admin$/, async (msg) => {
+  if (!isAdmin(msg.chat.id)) {
+    return bot.sendMessage(msg.chat.id, '❌ У тебя нет доступа к этой команде.');
+  }
+
+  return sendAdminPanel(msg.chat.id);
+});
+
+bot.onText(/^\/addadmin\s+(\d+)$/, async (msg, match) => {
+  if (!isOwner(msg.chat.id)) {
+    return bot.sendMessage(msg.chat.id, '❌ Назначать админов может только владелец.');
+  }
+
+  const targetChatId = Number(match[1]);
+
+  if (!targetChatId) {
+    return bot.sendMessage(msg.chat.id, 'Использование:\n/addadmin CHAT_ID');
+  }
+
+  if (targetChatId === OWNER_CHAT_ID) {
+    return bot.sendMessage(msg.chat.id, 'Этот chat id уже владелец.');
+  }
+
+  addAdmin(targetChatId);
+
+  try {
+    await bot.sendMessage(
+      targetChatId,
+      '✅ Тебе выдали права администратора.\n\nТеперь тебе доступны /admin, /stats, /dialogs, /reply и другие админ-команды.'
+    );
+  } catch (error) {
+    console.error('Не удалось уведомить нового админа:', error.message);
+  }
+
+  return bot.sendMessage(msg.chat.id, `✅ Админ ${targetChatId} добавлен`);
+});
+
+bot.onText(/^\/deladmin\s+(\d+)$/, async (msg, match) => {
+  if (!isOwner(msg.chat.id)) {
+    return bot.sendMessage(msg.chat.id, '❌ Удалять админов может только владелец.');
+  }
+
+  const targetChatId = Number(match[1]);
+
+  if (!targetChatId) {
+    return bot.sendMessage(msg.chat.id, 'Использование:\n/deladmin CHAT_ID');
+  }
+
+  removeAdmin(targetChatId);
+
+  try {
+    await bot.sendMessage(
+      targetChatId,
+      'ℹ️ Права администратора у тебя сняты.'
+    );
+  } catch (error) {
+    console.error('Не удалось уведомить удалённого админа:', error.message);
+  }
+
+  return bot.sendMessage(msg.chat.id, `✅ Админ ${targetChatId} удалён`);
+});
+
+bot.onText(/^\/admins$/, async (msg) => {
+  if (!isAdmin(msg.chat.id)) {
+    return bot.sendMessage(msg.chat.id, '❌ У тебя нет доступа к этой команде.');
+  }
+
+  return bot.sendMessage(msg.chat.id, buildAdminsText(), {
+    parse_mode: 'HTML',
+  });
+});
+
 bot.onText(/^\/reply\s+(\d+)\s+([\s\S]+)/, async (msg, match) => {
-  if (msg.chat.id !== OWNER_CHAT_ID) {
+  if (!isAdmin(msg.chat.id)) {
     return bot.sendMessage(msg.chat.id, '❌ У тебя нет доступа к этой команде.');
   }
 
@@ -621,7 +878,7 @@ ${escapeHtml(replyText)}`,
 });
 
 bot.onText(/^\/close\s+(\d+)/, async (msg, match) => {
-  if (msg.chat.id !== OWNER_CHAT_ID) {
+  if (!isAdmin(msg.chat.id)) {
     return bot.sendMessage(msg.chat.id, '❌ У тебя нет доступа к этой команде.');
   }
 
@@ -649,7 +906,7 @@ bot.onText(/^\/close\s+(\d+)/, async (msg, match) => {
 });
 
 bot.onText(/^\/status\s+(\d+)\s+(new|in_progress|waiting|closed)$/i, async (msg, match) => {
-  if (msg.chat.id !== OWNER_CHAT_ID) {
+  if (!isAdmin(msg.chat.id)) {
     return bot.sendMessage(msg.chat.id, '❌ У тебя нет доступа к этой команде.');
   }
 
@@ -670,105 +927,59 @@ bot.onText(/^\/status\s+(\d+)\s+(new|in_progress|waiting|closed)$/i, async (msg,
 });
 
 bot.onText(/^\/stats$/, async (msg) => {
-  if (msg.chat.id !== OWNER_CHAT_ID) {
+  if (!isAdmin(msg.chat.id)) {
     return bot.sendMessage(msg.chat.id, '❌ У тебя нет доступа к этой команде.');
   }
 
-  const db = readDb();
-  const totalLeads = db.leads.filter((x) => x.type === 'lead').length;
-  const totalDialogs = Object.values(db.users).filter((u) => u.activeDialog).length;
-  const statusCounts = Object.values(db.users).reduce(
-    (acc, user) => {
-      acc[user.currentStatus] = (acc[user.currentStatus] || 0) + 1;
-      return acc;
-    },
-    { new: 0, in_progress: 0, waiting: 0, closed: 0 }
-  );
-
-  return bot.sendMessage(
-    msg.chat.id,
-    `📊 Статистика бота
-
-📩 Всего заявок: ${totalLeads}
-💬 Активных диалогов: ${totalDialogs}
-
-Статусы:
-• Новых: ${statusCounts.new || 0}
-• В работе: ${statusCounts.in_progress || 0}
-• Ждут ответа: ${statusCounts.waiting || 0}
-• Закрытых: ${statusCounts.closed || 0}`
-  );
+  return bot.sendMessage(msg.chat.id, buildStatsText(), {
+    parse_mode: 'HTML',
+  });
 });
 
 bot.onText(/^\/dialogs$/, async (msg) => {
-  if (msg.chat.id !== OWNER_CHAT_ID) {
+  if (!isAdmin(msg.chat.id)) {
     return bot.sendMessage(msg.chat.id, '❌ У тебя нет доступа к этой команде.');
   }
 
-  const db = readDb();
-  const active = Object.values(db.users).filter((u) => u.activeDialog);
-
-  if (!active.length) {
-    return bot.sendMessage(msg.chat.id, 'Сейчас активных диалогов нет.');
-  }
-
-  const lines = active.slice(-20).map((u) => {
-    return `• ${u.name} | ${u.username} | ${u.chatId} | ${leadStatusLabel(u.currentStatus)}`;
+  return bot.sendMessage(msg.chat.id, buildDialogsText(), {
+    parse_mode: 'HTML',
   });
-
-  return bot.sendMessage(
-    msg.chat.id,
-    `💬 Активные диалоги:
-
-${lines.join('\n')}`
-  );
 });
 
 bot.onText(/^\/last(?:\s+(\d+))?$/, async (msg, match) => {
-  if (msg.chat.id !== OWNER_CHAT_ID) {
+  if (!isAdmin(msg.chat.id)) {
     return bot.sendMessage(msg.chat.id, '❌ У тебя нет доступа к этой команде.');
   }
 
-  const count = Math.min(Number(match?.[1] || 5), 20);
-  const db = readDb();
-  const items = db.leads.slice(-count).reverse();
+  const count = Math.min(Number(match?.[1] || 8), 20);
 
-  if (!items.length) {
-    return bot.sendMessage(msg.chat.id, 'Заявок пока нет.');
-  }
-
-  const lines = items.map((x) => {
-    return `#${x.id} | ${x.topic} | ${x.name} | ${x.chatId} | ${leadStatusLabel(x.status || 'new')}`;
+  return bot.sendMessage(msg.chat.id, buildLastText(count), {
+    parse_mode: 'HTML',
   });
-
-  return bot.sendMessage(
-    msg.chat.id,
-    `🧾 Последние ${items.length} записей:
-
-${lines.join('\n')}`
-  );
 });
 
 bot.onText(/^\/helpadmin$/, async (msg) => {
-  if (msg.chat.id !== OWNER_CHAT_ID) {
+  if (!isAdmin(msg.chat.id)) {
     return bot.sendMessage(msg.chat.id, '❌ У тебя нет доступа к этой команде.');
   }
 
+  const addAdminBlock = isOwner(msg.chat.id)
+    ? `\n<code>/addadmin CHAT_ID</code> — выдать права\n<code>/deladmin CHAT_ID</code> — снять права\n<code>/admins</code> — список админов`
+    : `\n<code>/admins</code> — список админов`;
+
   return bot.sendMessage(
     msg.chat.id,
-    `🛠 Админ-команды
+    `🛠 <b>Админ-команды</b>
 
-/reply CHAT_ID текст
-/close CHAT_ID
-/status CHAT_ID new|in_progress|waiting|closed
-/stats
-/dialogs
-/last 10
-/helpadmin
-
-Шаблоны:
-• можно нажимать inline-кнопки в заявках
-• для быстрого ответа используй /reply`
+<code>/admin</code> — открыть мини админку
+<code>/reply CHAT_ID текст</code> — ответить клиенту
+<code>/close CHAT_ID</code> — закрыть диалог
+<code>/status CHAT_ID new|in_progress|waiting|closed</code>
+<code>/stats</code> — статистика
+<code>/dialogs</code> — активные диалоги
+<code>/last 10</code> — последние заявки
+<code>/helpadmin</code> — список команд${addAdminBlock}`,
+    { parse_mode: 'HTML' }
   );
 });
 
@@ -780,7 +991,7 @@ bot.on('callback_query', async (query) => {
   const chatId = query.message?.chat.id;
   const data = query.data || '';
 
-  if (chatId !== OWNER_CHAT_ID) {
+  if (!isAdmin(chatId)) {
     return bot.answerCallbackQuery(query.id, {
       text: 'Нет доступа',
       show_alert: true,
@@ -788,6 +999,66 @@ bot.on('callback_query', async (query) => {
   }
 
   try {
+    if (data === 'admin:stats') {
+      await bot.sendMessage(chatId, buildStatsText(), {
+        parse_mode: 'HTML',
+      });
+      return bot.answerCallbackQuery(query.id, { text: 'Готово' });
+    }
+
+    if (data === 'admin:dialogs') {
+      await bot.sendMessage(chatId, buildDialogsText(), {
+        parse_mode: 'HTML',
+      });
+      return bot.answerCallbackQuery(query.id, { text: 'Готово' });
+    }
+
+    if (data === 'admin:last') {
+      await bot.sendMessage(chatId, buildLastText(8), {
+        parse_mode: 'HTML',
+      });
+      return bot.answerCallbackQuery(query.id, { text: 'Готово' });
+    }
+
+    if (data === 'admin:templates') {
+      await bot.sendMessage(
+        chatId,
+        '🧩 <b>Шаблоны быстрых ответов</b>',
+        {
+          parse_mode: 'HTML',
+          reply_markup: getTemplatesKeyboard(),
+        }
+      );
+      return bot.answerCallbackQuery(query.id, { text: 'Открыто' });
+    }
+
+    if (data === 'admin:admins') {
+      await bot.sendMessage(chatId, buildAdminsText(), {
+        parse_mode: 'HTML',
+      });
+      return bot.answerCallbackQuery(query.id, { text: 'Готово' });
+    }
+
+    if (data === 'admin:home') {
+      await sendAdminPanel(chatId);
+      return bot.answerCallbackQuery(query.id, { text: 'Назад' });
+    }
+
+    if (data.startsWith('admin_template:')) {
+      const key = data.split(':')[1];
+      let text = 'Привет! Увидел заявку. Напиши, пожалуйста, подробнее.';
+      if (key === 'site') {
+        text = 'Шаблон для сайта:\n/reply CHAT_ID Привет 👋 Увидел заявку по сайту. Напиши, пожалуйста, подробнее, какой результат хочешь получить.';
+      } else if (key === 'support') {
+        text = 'Шаблон для техподдержки:\n/reply CHAT_ID Привет 👋 Увидел твою заявку. Опиши, пожалуйста, что именно не работает и какая сейчас ошибка.';
+      } else if (key === 'admin') {
+        text = 'Шаблон для администрирования:\n/reply CHAT_ID Привет 👋 Увидел заявку. Напиши, пожалуйста, что именно нужно настроить и в каком формате это удобнее сделать.';
+      }
+
+      await bot.sendMessage(chatId, text);
+      return bot.answerCallbackQuery(query.id, { text: 'Шаблон отправлен' });
+    }
+
     if (data.startsWith('status:')) {
       const [, targetChatIdRaw, status] = data.split(':');
       const targetChatId = Number(targetChatIdRaw);
@@ -799,11 +1070,9 @@ bot.on('callback_query', async (query) => {
         userState[targetChatId] = { step: 'main' };
       }
 
-      await bot.answerCallbackQuery(query.id, {
+      return bot.answerCallbackQuery(query.id, {
         text: `Статус: ${leadStatusLabel(status)}`,
       });
-
-      return;
     }
 
     if (data.startsWith('template:')) {
@@ -834,11 +1103,9 @@ ${escapeHtml(templateText)}`,
         step: 'dialog',
       };
 
-      await bot.answerCallbackQuery(query.id, {
+      return bot.answerCallbackQuery(query.id, {
         text: 'Шаблон отправлен',
       });
-
-      return;
     }
 
     await bot.answerCallbackQuery(query.id);
@@ -890,7 +1157,7 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
 // =========================
 
 bot.on('photo', async (msg) => {
-  if (msg.chat.id === OWNER_CHAT_ID) return;
+  if (isAdmin(msg.chat.id)) return;
   if (isSpam(msg.chat.id, 'photo:' + (msg.caption || ''))) return;
 
   const db = readDb();
@@ -901,14 +1168,14 @@ bot.on('photo', async (msg) => {
 
   userState[msg.chat.id] = { step: 'dialog' };
 
-  await notifyOwnerAboutMedia(msg, 'фото');
+  await notifyAdminsAboutMedia(msg, 'фото');
   await bot.sendMessage(msg.chat.id, getDialogReplyText(), {
     reply_markup: getDialogKeyboard(),
   });
 });
 
 bot.on('document', async (msg) => {
-  if (msg.chat.id === OWNER_CHAT_ID) return;
+  if (isAdmin(msg.chat.id)) return;
   if (isSpam(msg.chat.id, 'document:' + (msg.caption || ''))) return;
 
   const db = readDb();
@@ -919,14 +1186,14 @@ bot.on('document', async (msg) => {
 
   userState[msg.chat.id] = { step: 'dialog' };
 
-  await notifyOwnerAboutMedia(msg, 'документ');
+  await notifyAdminsAboutMedia(msg, 'документ');
   await bot.sendMessage(msg.chat.id, getDialogReplyText(), {
     reply_markup: getDialogKeyboard(),
   });
 });
 
 bot.on('voice', async (msg) => {
-  if (msg.chat.id === OWNER_CHAT_ID) return;
+  if (isAdmin(msg.chat.id)) return;
   if (isSpam(msg.chat.id, 'voice')) return;
 
   const db = readDb();
@@ -937,14 +1204,14 @@ bot.on('voice', async (msg) => {
 
   userState[msg.chat.id] = { step: 'dialog' };
 
-  await notifyOwnerAboutMedia(msg, 'голосовое');
+  await notifyAdminsAboutMedia(msg, 'голосовое');
   await bot.sendMessage(msg.chat.id, getDialogReplyText(), {
     reply_markup: getDialogKeyboard(),
   });
 });
 
 bot.on('video', async (msg) => {
-  if (msg.chat.id === OWNER_CHAT_ID) return;
+  if (isAdmin(msg.chat.id)) return;
   if (isSpam(msg.chat.id, 'video:' + (msg.caption || ''))) return;
 
   const db = readDb();
@@ -955,14 +1222,14 @@ bot.on('video', async (msg) => {
 
   userState[msg.chat.id] = { step: 'dialog' };
 
-  await notifyOwnerAboutMedia(msg, 'видео');
+  await notifyAdminsAboutMedia(msg, 'видео');
   await bot.sendMessage(msg.chat.id, getDialogReplyText(), {
     reply_markup: getDialogKeyboard(),
   });
 });
 
 bot.on('sticker', async (msg) => {
-  if (msg.chat.id === OWNER_CHAT_ID) return;
+  if (isAdmin(msg.chat.id)) return;
   if (isSpam(msg.chat.id, 'sticker')) return;
 
   const db = readDb();
@@ -973,7 +1240,7 @@ bot.on('sticker', async (msg) => {
 
   userState[msg.chat.id] = { step: 'dialog' };
 
-  await notifyOwnerAboutMedia(msg, 'стикер');
+  await notifyAdminsAboutMedia(msg, 'стикер');
   await bot.sendMessage(msg.chat.id, getDialogReplyText(), {
     reply_markup: getDialogKeyboard(),
   });
@@ -996,8 +1263,12 @@ bot.on('message', async (msg) => {
   if (text.startsWith('/dialogs')) return;
   if (text.startsWith('/last')) return;
   if (text.startsWith('/helpadmin')) return;
+  if (text.startsWith('/admin')) return;
+  if (text.startsWith('/addadmin')) return;
+  if (text.startsWith('/deladmin')) return;
+  if (text.startsWith('/admins')) return;
 
-  if (chatId === OWNER_CHAT_ID) {
+  if (isAdmin(chatId)) {
     return;
   }
 
@@ -1016,9 +1287,8 @@ bot.on('message', async (msg) => {
     );
   }
 
-  // Если уже диалог активен — просто шлём дальше
   if (userState[chatId].step === 'dialog') {
-    await notifyOwnerAboutDialogMessage(msg);
+    await notifyAdminsAboutDialogMessage(msg);
 
     const db = readDb();
     const user = getUserRecord(db, chatId, msg);
@@ -1048,7 +1318,7 @@ bot.on('message', async (msg) => {
   if (text === '⚙️ Администрирование') {
     userState[chatId] = { step: 'admin_menu' };
     return bot.sendMessage(chatId, 'Выбери, что нужно настроить:', {
-      reply_markup: getAdminKeyboard(),
+      reply_markup: getAdminKeyboardUser(),
     });
   }
 
@@ -1059,7 +1329,6 @@ bot.on('message', async (msg) => {
     });
   }
 
-  // ===== САЙТЫ =====
   if (
     text === 'Сайт-визитка' ||
     text === 'Лендинг' ||
@@ -1088,7 +1357,7 @@ bot.on('message', async (msg) => {
   if (userState[chatId].step === 'wait_site_deadline') {
     userState[chatId].deadline = text;
 
-    await notifyOwnerAboutLead({
+    await notifyAdminsAboutLead({
       msg,
       title: 'Новая заявка',
       source: 'сайт/бот',
@@ -1107,7 +1376,6 @@ bot.on('message', async (msg) => {
     });
   }
 
-  // ===== ТЕХПОДДЕРЖКА =====
   if (
     text === 'Проблема с ПК' ||
     text === 'Не работает программа' ||
@@ -1144,7 +1412,7 @@ bot.on('message', async (msg) => {
   if (userState[chatId].step === 'wait_support_urgency') {
     userState[chatId].urgency = text;
 
-    await notifyOwnerAboutLead({
+    await notifyAdminsAboutLead({
       msg,
       title: 'Новая заявка',
       source: 'сайт/бот',
@@ -1163,7 +1431,6 @@ bot.on('message', async (msg) => {
     });
   }
 
-  // ===== АДМИНИСТРИРОВАНИЕ =====
   if (
     text === 'Настройка ПК' ||
     text === 'Настройка сети' ||
@@ -1200,7 +1467,7 @@ bot.on('message', async (msg) => {
   if (userState[chatId].step === 'wait_admin_format') {
     userState[chatId].format = text;
 
-    await notifyOwnerAboutLead({
+    await notifyAdminsAboutLead({
       msg,
       title: 'Новая заявка',
       source: 'сайт/бот',
@@ -1219,7 +1486,6 @@ bot.on('message', async (msg) => {
     });
   }
 
-  // ===== СВЯЗЬ =====
   if (text === 'Оставить заявку') {
     userState[chatId] = { step: 'wait_contact_text' };
 
@@ -1237,7 +1503,7 @@ bot.on('message', async (msg) => {
   }
 
   if (userState[chatId].step === 'wait_contact_text') {
-    await notifyOwnerAboutLead({
+    await notifyAdminsAboutLead({
       msg,
       title: 'Новая заявка',
       source: 'сайт/бот',
