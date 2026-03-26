@@ -17,7 +17,7 @@ if (!OWNER_CHAT_ID) {
 }
 
 const bot = new TelegramBot(token, { polling: true });
-
+const userState = {};
 console.log('Бот запущен...');
 
 function getMainKeyboard() {
