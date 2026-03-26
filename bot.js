@@ -1,11 +1,24 @@
 const TelegramBot = require('node-telegram-bot-api');
 
-const token = process.env.BOT_TOKEN;
-const OWNER_CHAT_ID = 8285132370; // сюда вставь свой chat id
+const token =
+  process.env.TELEGRAM_BOT_TOKEN ||
+  process.env.TELEGRAM_TOKEN ||
+  process.env.BOT_TOKEN ||
+  process.env.TOKEN;
+
+const OWNER_CHAT_ID = Number(process.env.OWNER_CHAT_ID);
+
+if (!token) {
+  throw new Error('Токен бота не найден в переменных окружения');
+}
+
+if (!OWNER_CHAT_ID) {
+  console.warn('OWNER_CHAT_ID не задан');
+}
 
 const bot = new TelegramBot(token, { polling: true });
 
-const userState = {};
+console.log('Бот запущен...');
 
 function getMainKeyboard() {
   return {
