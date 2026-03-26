@@ -17,7 +17,6 @@ if (!OWNER_CHAT_ID) {
 }
 
 const bot = new TelegramBot(token, { polling: true });
-
 const userState = {};
 
 console.log('Бот запущен...');
@@ -75,10 +74,7 @@ function getContactKeyboard() {
   };
 }
 
-async function sendMainMenu(
-  chatId,
-  text = 'Привет 👋\nЯ помощник Алексея.\n\nВыбери, что тебе нужно:'
-) {
+async function sendMainMenu(chatId, text = 'Выбери, что тебе нужно 👇') {
   userState[chatId] = { step: 'main' };
 
   await bot.sendMessage(chatId, text, {
@@ -86,20 +82,57 @@ async function sendMainMenu(
   });
 }
 
-async function forwardLeadToOwner(msg, topic) {
+async function sendOwnerLead({
+  msg,
+  topic,
+  details = [],
+  source = 'бот',
+}) {
   const name =
     [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'Не указано';
 
   const username = msg.from?.username ? '@' + msg.from.username : 'нет';
-
   const replyHint = `/reply ${msg.chat.id} `;
+
+  const extraDetails = details
+    .filter(Boolean)
+    .map((item) => item.trim())
+    .join('\n');
 
   await bot.sendMessage(
     OWNER_CHAT_ID,
     `📩 <b>Новая заявка</b>
 
-📍 <b>Источник:</b> бот
+📍 <b>Источник:</b> ${source}
 📌 <b>Тема:</b> ${topic}
+👤 <b>Имя:</b> ${name}
+🔗 <b>Username:</b> ${username}
+🆔 <b>User ID:</b> ${msg.from?.id}
+💬 <b>Chat ID:</b> ${msg.chat.id}
+${extraDetails ? '\n' + extraDetails : ''}
+
+<b>Сообщение:</b>
+${msg.text}
+
+<b>Быстрый ответ:</b>
+<code>${replyHint}</code>`,
+    {
+      parse_mode: 'HTML',
+    }
+  );
+}
+
+async function forwardDialogMessageToOwner(msg) {
+  const name =
+    [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'Не указано';
+
+  const username = msg.from?.username ? '@' + msg.from.username : 'нет';
+  const replyHint = `/reply ${msg.chat.id} `;
+
+  await bot.sendMessage(
+    OWNER_CHAT_ID,
+    `💬 <b>Новое сообщение в диалоге</b>
+
 👤 <b>Имя:</b> ${name}
 🔗 <b>Username:</b> ${username}
 🆔 <b>User ID:</b> ${msg.from?.id}
@@ -116,7 +149,14 @@ ${msg.text}
   );
 }
 
-// Команда ответа клиенту от имени бота
+function getOnlineReplyText() {
+  return `Заявку получил ✅
+
+🟢 Алексей сейчас онлайн
+💬 Ответ обычно в течение 10–30 минут`;
+}
+
+// Ответ клиенту от имени бота
 bot.onText(/^\/reply\s+(\d+)\s+([\s\S]+)/, async (msg, match) => {
   const ownerChatId = msg.chat.id;
 
@@ -142,6 +182,11 @@ bot.onText(/^\/reply\s+(\d+)\s+([\s\S]+)/, async (msg, match) => {
 ${replyText}`
     );
 
+    userState[targetChatId] = {
+      ...(userState[targetChatId] || {}),
+      step: 'dialog',
+    };
+
     await bot.sendMessage(
       ownerChatId,
       `✅ Ответ отправлен пользователю ${targetChatId}`
@@ -155,13 +200,23 @@ ${replyText}`
 });
 
 bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
   const source = match?.[1];
+
   const helloText =
     source === 'site'
-      ? 'Привет 👋\nТы пришёл с сайта Алексея.\n\nВыбери, что тебе нужно:'
-      : 'Привет 👋\nЯ помощник Алексея.\n\nВыбери, что тебе нужно:';
+      ? 'Привет 👋\nТы пришёл с сайта Алексея.\n\nЧем могу помочь?'
+      : 'Привет 👋\nЯ помощник Алексея.\n\nЧем могу помочь?';
 
-  await sendMainMenu(msg.chat.id, helloText);
+  await bot.sendMessage(chatId, helloText);
+
+  setTimeout(async () => {
+    try {
+      await sendMainMenu(chatId);
+    } catch (error) {
+      console.error('Ошибка отправки главного меню:', error.message);
+    }
+  }, 800);
 });
 
 bot.on('message', async (msg) => {
@@ -178,6 +233,19 @@ bot.on('message', async (msg) => {
 
   if (text === '⬅️ Назад') {
     return sendMainMenu(chatId);
+  }
+
+  // Если уже идёт диалог — просто пересылаем сообщение владельцу
+  if (userState[chatId].step === 'dialog') {
+    await forwardDialogMessageToOwner(msg);
+
+    return bot.sendMessage(
+      chatId,
+      `Сообщение передал ✅
+
+🟢 Алексей сейчас онлайн
+💬 Можешь продолжать писать сюда, не выбирая тему заново.`
+    );
   }
 
   if (text === '🌐 Сайт') {
@@ -218,14 +286,43 @@ bot.on('message', async (msg) => {
     text === 'Доработка сайта' ||
     text === 'Интернет-магазин'
   ) {
-    await forwardLeadToOwner(msg, `Сайт: ${text}`);
+    userState[chatId] = {
+      step: 'wait_budget',
+      topic: text,
+    };
 
-    return bot.sendMessage(
-      chatId,
-      `Заявку получил ✅
+    return bot.sendMessage(chatId, 'Отлично 👍\n\nНапиши примерный бюджет:');
+  }
 
-Алексей уже увидел её и ответит тебе в ближайшее время.`
-    );
+  if (userState[chatId].step === 'wait_budget') {
+    userState[chatId].budget = text;
+    userState[chatId].step = 'wait_deadline';
+
+    return bot.sendMessage(chatId, 'Хорошо 👌\n\nА какие сроки?');
+  }
+
+  if (userState[chatId].step === 'wait_deadline') {
+    userState[chatId].deadline = text;
+
+    const topic = userState[chatId].topic;
+    const budget = userState[chatId].budget;
+    const deadline = userState[chatId].deadline;
+
+    await sendOwnerLead({
+      msg,
+      topic: `Сайт: ${topic}`,
+      details: [
+        `💰 <b>Бюджет:</b> ${budget}`,
+        `⏳ <b>Сроки:</b> ${deadline}`,
+      ],
+      source: 'сайт/бот',
+    });
+
+    userState[chatId] = { step: 'dialog' };
+
+    return bot.sendMessage(chatId, getOnlineReplyText(), {
+      reply_markup: getMainKeyboard(),
+    });
   }
 
   if (
@@ -234,14 +331,15 @@ bot.on('message', async (msg) => {
     text === 'Проблема с интернетом' ||
     text === 'Нужна удалённая помощь'
   ) {
-    await forwardLeadToOwner(msg, `Техподдержка: ${text}`);
+    await sendOwnerLead({
+      msg,
+      topic: `Техподдержка: ${text}`,
+      source: 'сайт/бот',
+    });
 
-    return bot.sendMessage(
-      chatId,
-      `Заявку получил ✅
+    userState[chatId] = { step: 'dialog' };
 
-Алексей уже увидел её и ответит тебе в ближайшее время.`
-    );
+    return bot.sendMessage(chatId, getOnlineReplyText());
   }
 
   if (
@@ -250,14 +348,15 @@ bot.on('message', async (msg) => {
     text === 'Удалённый доступ' ||
     text === 'Пользователи и права'
   ) {
-    await forwardLeadToOwner(msg, `Администрирование: ${text}`);
+    await sendOwnerLead({
+      msg,
+      topic: `Администрирование: ${text}`,
+      source: 'сайт/бот',
+    });
 
-    return bot.sendMessage(
-      chatId,
-      `Заявку получил ✅
+    userState[chatId] = { step: 'dialog' };
 
-Алексей уже увидел её и ответит тебе в ближайшее время.`
-    );
+    return bot.sendMessage(chatId, getOnlineReplyText());
   }
 
   if (text === 'Оставить заявку') {
@@ -280,19 +379,17 @@ bot.on('message', async (msg) => {
   }
 
   if (userState[chatId].step === 'wait_text') {
-    await forwardLeadToOwner(msg, 'Связь с Алексеем');
+    await sendOwnerLead({
+      msg,
+      topic: 'Связь с Алексеем',
+      source: 'сайт/бот',
+    });
 
-    userState[chatId] = { step: 'main' };
+    userState[chatId] = { step: 'dialog' };
 
-    return bot.sendMessage(
-      chatId,
-      `Сообщение получил ✅
-
-Алексей уже увидел его и ответит тебе в ближайшее время.`,
-      {
-        reply_markup: getMainKeyboard(),
-      }
-    );
+    return bot.sendMessage(chatId, getOnlineReplyText(), {
+      reply_markup: getMainKeyboard(),
+    });
   }
 
   return bot.sendMessage(chatId, 'Выбери нужный раздел кнопками ниже 👇', {
